@@ -27,6 +27,7 @@ type GatewayService struct {
 	pool         *ProxyPoolService
 	coordinator  *Coordinator
 	runner       netx.CommandRunner
+	lifetimeCtx  context.Context
 
 	opMu              sync.Mutex
 	mu                sync.Mutex
@@ -42,15 +43,19 @@ type GatewayService struct {
 }
 
 // NewGatewayService constructs a GatewayService.
-func NewGatewayService(cfg *config.Config, nodes *store.NodeRepository, settingsRepo *store.SettingsRepository,
+func NewGatewayService(ctx context.Context, cfg *config.Config, nodes *store.NodeRepository, settingsRepo *store.SettingsRepository,
 	mgr *tunnel.Manager, router *netx.PolicyRouter, pg *proxy.Gateway, pool *ProxyPoolService,
 	coordinator *Coordinator, runner netx.CommandRunner) *GatewayService {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if runner == nil {
 		runner = netx.SystemCommandRunner{}
 	}
 	return &GatewayService{
 		cfg: cfg, nodes: nodes, settingsRepo: settingsRepo, tunnel: mgr, router: router,
-		proxy: pg, pool: pool, coordinator: coordinator, runner: runner, connectionEnabled: true,
+		proxy: pg, pool: pool, coordinator: coordinator, runner: runner, lifetimeCtx: ctx,
+		connectionEnabled: true,
 	}
 }
 
@@ -107,10 +112,10 @@ func (g *GatewayService) activate(ctx context.Context, nodeID string) (domain.Tu
 	// Release our own tunnel before testing the device name. The availability
 	// check reads the device off running processes' command lines, so it cannot
 	// tell our outgoing OpenVPN from a stranger's: with the incumbent still up,
-	// every rotation failed as "in use by another running tunnel process" and
-	// the caller blacklisted a healthy node for it. Connect tears the old tunnel
-	// down regardless — doing it here only lets the check see the truth. The
-	// validation above still runs first, so a rejected node costs no exit.
+	// every rotation failed as "in use by another running tunnel process" and the
+	// caller blacklisted a healthy node for it. Connect tears the old tunnel down
+	// regardless — doing it here only lets the check see the truth. The validation
+	// above still runs first, so a rejected node costs no exit.
 	g.tunnel.Disconnect()
 
 	// Verify the active device name is actually free before OpenVPN gets it —
@@ -227,7 +232,10 @@ func (g *GatewayService) handleUnexpectedExit(code int) {
 	if nodeID == "" {
 		return
 	}
-	ctx := context.Background()
+	ctx := g.lifetimeCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	g.setLastError(fmt.Sprintf("OpenVPN exited unexpectedly (code=%d)", code))
 	_ = g.router.Cleanup(ctx)
 	g.mu.Lock()

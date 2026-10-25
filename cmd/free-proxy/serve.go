@@ -47,22 +47,14 @@ func buildDeps(ctx context.Context, cfg *config.Config, repos *store.Repos, auth
 	})
 
 	adminCfg := auth.Store.Config()
-	// The persisted proxy password is deliberately non-recoverable. Give the
-	// in-process health checker an ephemeral credential so it exercises the same
-	// authenticated listener as every other client without weakening loopback
-	// authentication. These values exist only for this process lifetime.
 	healthUsername := security.RandomCredential(32)
 	healthPassword := security.RandomCredential(32)
 	connector := proxy.NewSocketConnector(cfg.TunnelInterface, config.ProxyDNSServer, config.ProxyConnectTimeout)
-	// Both of these run on every accepted proxy connection, so neither may go to
-	// the database or to scrypt unconditionally — see ProxyAuthenticator.
 	proxyAuth := security.NewProxyAuthenticator(repos.App)
 	proxyGateway := proxy.New(proxy.Options{
 		Host: "0.0.0.0", Port: adminCfg.ProxyPort,
 		MaxConnections: config.ProxyMaxConnections,
 		ConnectTimeout: config.ProxyConnectTimeout, IdleTimeout: config.ProxyIdleTimeout,
-		// Fails closed on a database read error. The internal health credential
-		// remains usable so monitoring does not trigger a false recovery.
 		AuthRequired: proxyAuth.Required,
 		Authenticate: proxyAuth.Authenticate,
 		InternalAuthenticate: func(username, password string) bool {
@@ -70,13 +62,11 @@ func buildDeps(ctx context.Context, cfg *config.Config, repos *store.Repos, auth
 			healthPasswordOK := subtle.ConstantTimeCompare([]byte(password), []byte(healthPassword))
 			return healthUserOK&healthPasswordOK == 1
 		},
-		// Listener binds all interfaces; non-loopback clients are gated at runtime
-		// by the admin toggle (default off) and still require proxy auth.
 		ExternalAllowed: func() bool { return auth.Store.Config().ProxyExternalAllowed() },
 	}, connector)
 
 	pool := services.NewProxyPoolService(repos.Nodes, repos.Settings)
-	gateway := services.NewGatewayService(cfg, repos.Nodes, repos.Settings, tunnelMgr, router, proxyGateway, pool, coordinator, runner)
+	gateway := services.NewGatewayService(ctx, cfg, repos.Nodes, repos.Settings, tunnelMgr, router, proxyGateway, pool, coordinator, runner)
 	autoSwitch := services.NewAutoSwitchService(repos.Nodes, repos.Settings, pool, gateway)
 	// The reconnect backs off, so it can still be waiting when the process is
 	// asked to stop. It gets the lifetime context rather than a Background one,
@@ -96,9 +86,6 @@ func buildDeps(ctx context.Context, cfg *config.Config, repos *store.Repos, auth
 		discovery, probe, pool, gateway, autoSwitch, coordinator)
 	liveness := services.NewLivenessService(repos.Nodes, gateway)
 
-	// The updater is given the version this binary was stamped with — what it
-	// compares against the published releases — and the file `install` writes
-	// to while it finishes an upgrade this process will not be alive to see.
 	selfUpdate := updater.New(cfg.UpdateRepo, version, filepath.Join(cfg.LogsDir(), "update.log"))
 
 	return &api.Deps{
@@ -150,7 +137,6 @@ func runServe(ctx context.Context, cfg *config.Config, hostOverride string, port
 		slog.Warn("job init failed", "module", "serve", "err", err)
 	}
 
-	// Startup preflight (advisory).
 	for _, check := range deps.Diagnostics.StartupPreflight(ctx).Checks {
 		if !check.OK {
 			slog.Warn("preflight check failed", "module", "serve", "check", check.Name, "detail", check.Detail)
@@ -161,17 +147,11 @@ func runServe(ctx context.Context, cfg *config.Config, hostOverride string, port
 		slog.Error("proxy gateway did not start", "module", "serve", "err", err)
 	}
 
-	// Background upkeep is no longer switchable. Maintenance is what keeps the
-	// pool worth selecting from — without it the node list ages into a set of
-	// exits that no longer answer — so an install that turns it off is an install
-	// that stops working a few hours later.
 	go deps.HealthMon.Run(ctx)
 	go deps.ActiveLatencyMon.Run(ctx)
 	go deps.MaintenanceMon.Run(ctx)
 	go deps.LivenessMon.Run(ctx)
 
-	// Bind all interfaces; external web access is gated at runtime by the admin
-	// toggle (default on) — see api.ExternalAccessGuard. A --host flag still wins.
 	host := firstNonEmptyStr(hostOverride, "0.0.0.0")
 	port := adminCfg.Port
 	if portOverride != 0 {

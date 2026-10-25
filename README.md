@@ -67,7 +67,7 @@ ssh root@你的服务器IP
 **第 2 步 · 一行命令安装**
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/8aot/free-proxy/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/8aot/free-proxy/perf/security-hardening/install.sh)
 ```
 
 脚本会自动:下载对应架构的程序 → 安装系统依赖(openvpn 等)→ 注册开机自启服务 → 启动。等它跑完即可,全程无需交互。
