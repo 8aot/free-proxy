@@ -26,10 +26,15 @@ type Provider struct {
 	timeout time.Duration
 
 	httpClient *http.Client // optional injected client for tests
-	clients    []*http.Client
+	clients    []clientTarget
 	now        func() time.Time
 
 	LastStats ParseStats
+}
+
+type clientTarget struct {
+	client   *http.Client
+	endpoint string
 }
 
 // NewProvider builds a Provider over the VPN Gate endpoint.
@@ -76,8 +81,8 @@ func (p *Provider) Discover(ctx context.Context) ([]domain.DiscoveredNode, error
 		p.clients = targets
 	}
 	var lastErr error
-	for _, client := range targets {
-		nodes, err := p.fetch(ctx, client, p.apiURL)
+	for _, target := range targets {
+		nodes, err := p.fetch(ctx, target.client, target.endpoint)
 		if err != nil {
 			lastErr = err
 			continue
@@ -128,7 +133,7 @@ func (p *Provider) fetch(ctx context.Context, client *http.Client, endpoint stri
 	return res.Nodes, nil
 }
 
-func buildFallbackClients(apiURL string, timeout time.Duration) []*http.Client {
+func buildFallbackClients(apiURL string, timeout time.Duration) []clientTarget {
 	targets := []target{{apiURL, true}}
 	if strings.HasPrefix(apiURL, "https://") {
 		targets = append(targets,
@@ -136,9 +141,9 @@ func buildFallbackClients(apiURL string, timeout time.Duration) []*http.Client {
 			target{strings.Replace(apiURL, "https://", "http://", 1), true},
 		)
 	}
-	clients := make([]*http.Client, 0, len(targets))
+	clients := make([]clientTarget, 0, len(targets))
 	for _, t := range targets {
-		clients = append(clients, buildClient(t.verify, timeout))
+		clients = append(clients, clientTarget{client: buildClient(t.verify, timeout), endpoint: t.url})
 	}
 	return clients
 }
